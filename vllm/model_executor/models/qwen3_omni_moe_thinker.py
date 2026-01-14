@@ -714,6 +714,214 @@ Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 class Qwen3OmniMoeThinkerMultiModalProcessor(
     Qwen2_5OmniThinkerMultiModalProcessor,
 ):
+    def _apply_mixed_audio_video_prompt_updates(
+        self,
+        prompt_ids: list[int],
+        mm_items: MultiModalDataItems,
+        mm_kwargs: MultiModalKwargsItems,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        tokenizer = self.info.get_tokenizer()
+        processor = self.info.get_hf_processor()
+        vocab = tokenizer.get_vocab()
+
+        audio_pad_id = vocab[processor.audio_token]
+        image_pad_id = vocab[processor.image_token]
+        video_pad_id = vocab[processor.video_token]
+        audio_bos_id = tokenizer.encode(processor.audio_bos_token)[0]
+        audio_eos_id = tokenizer.encode(processor.audio_eos_token)[0]
+        vision_bos_id = tokenizer.encode(processor.vision_bos_token)[0]
+        vision_eos_id = tokenizer.encode(processor.vision_eos_token)[0]
+
+        out_mm_data = mm_kwargs.get_data()
+        audio_feature_lengths = out_mm_data.get("audio_feature_lengths")
+        feature_attention_mask = out_mm_data.get("feature_attention_mask")
+        if audio_feature_lengths is None and feature_attention_mask is None:
+            audio_output_lengths = []
+        elif audio_feature_lengths is not None:
+            _, audio_output_lens = _get_feat_extract_output_lengths(audio_feature_lengths)
+            audio_output_lengths = audio_output_lens.tolist()
+        else:
+            _, audio_output_lens = _get_feat_extract_output_lengths(feature_attention_mask.sum(-1))
+            audio_output_lengths = audio_output_lens.tolist()
+
+        image_grid_thw = out_mm_data.get("image_grid_thw")
+        video_grid_thw = out_mm_data.get("video_grid_thw")
+        second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
+        image_processor = self.info.get_image_processor()
+        merge_length = image_processor.merge_size**2
+
+        image_lengths = []
+        if image_grid_thw is not None:
+            for grid in image_grid_thw:
+                image_lengths.append(int(grid.prod()) // merge_length)
+
+        video_lengths = []
+        if video_grid_thw is not None:
+            for grid in video_grid_thw:
+                video_lengths.append(int(grid.prod()) // merge_length)
+
+        positions = []
+        audio_start_by_pos = {}
+        video_start_by_pos = {}
+        image_start_by_pos = {}
+        audio_idx = 0
+        video_idx = 0
+        image_idx = 0
+        for i, tok in enumerate(prompt_ids):
+            if tok == vision_bos_id and i + 1 < len(prompt_ids):
+                nxt = prompt_ids[i + 1]
+                if nxt == image_pad_id:
+                    positions.append((i, "image", image_idx))
+                    image_start_by_pos[i] = image_idx
+                    image_idx += 1
+                elif nxt == video_pad_id or nxt == audio_bos_id:
+                    positions.append((i, "video", video_idx))
+                    video_start_by_pos[i] = video_idx
+                    video_idx += 1
+            if tok == audio_bos_id and (i == 0 or prompt_ids[i - 1] != vision_bos_id):
+                positions.append((i, "audio", audio_idx))
+                audio_start_by_pos[i] = audio_idx
+                audio_idx += 1
+
+        audio_positions = [(pos, idx) for pos, kind, idx in positions if kind == "audio"]
+        audio_ptr = 0
+        paired_video_to_audio = {}
+        paired_audio_set = set()
+        for pos, kind, vid_idx in positions:
+            if kind != "video":
+                continue
+            while audio_ptr < len(audio_positions) and audio_positions[audio_ptr][0] <= pos:
+                audio_ptr += 1
+            if audio_ptr < len(audio_positions):
+                _, aud_idx = audio_positions[audio_ptr]
+                paired_video_to_audio[vid_idx] = aud_idx
+                paired_audio_set.add(aud_idx)
+                audio_ptr += 1
+
+        def advance_to_token(start_idx: int, token_id: int) -> int:
+            idx = start_idx
+            while idx < len(prompt_ids) and prompt_ids[idx] != token_id:
+                idx += 1
+            return idx + 1 if idx < len(prompt_ids) else start_idx + 1
+
+        new_ids = []
+        audio_placeholders = {}
+        video_placeholders = {}
+        image_placeholders = {}
+
+        i = 0
+        while i < len(prompt_ids):
+            tok = prompt_ids[i]
+            if tok == vision_bos_id and i + 1 < len(prompt_ids):
+                nxt = prompt_ids[i + 1]
+                if nxt == image_pad_id:
+                    img_idx = image_start_by_pos.get(i)
+                    if img_idx is None:
+                        img_idx = len(image_placeholders)
+                    img_len = image_lengths[img_idx] if img_idx < len(image_lengths) else 0
+                    start_idx = len(new_ids) + 1
+                    new_ids.append(vision_bos_id)
+                    if img_len > 0:
+                        new_ids.extend([image_pad_id] * img_len)
+                    new_ids.append(vision_eos_id)
+                    image_placeholders[img_idx] = PlaceholderFeaturesInfo(
+                        modality="image",
+                        item_idx=img_idx,
+                        start_idx=start_idx,
+                        tokens=[image_pad_id] * img_len,
+                        is_embed=None,
+                    )
+                    i = advance_to_token(i + 1, vision_eos_id)
+                    continue
+                if nxt == video_pad_id or nxt == audio_bos_id:
+                    vid_idx = video_start_by_pos.get(i)
+                    if vid_idx is None:
+                        vid_idx = len(video_placeholders)
+                    new_ids.append(vision_bos_id)
+                    start_idx = len(new_ids)
+                    if vid_idx in paired_video_to_audio:
+                        aud_idx = paired_video_to_audio[vid_idx]
+                        if aud_idx >= len(audio_output_lengths):
+                            raise ValueError("Audio length index out of range for audio-in-video pairing.")
+                        if video_grid_thw is None or vid_idx >= len(video_grid_thw):
+                            raise ValueError("Missing video grid for audio-in-video pairing.")
+                        audio_len = audio_output_lengths[aud_idx]
+                        video_grid = video_grid_thw[vid_idx]
+                        if second_per_grid_ts is not None:
+                            video_second = float(second_per_grid_ts[vid_idx])
+                        else:
+                            video_second = 2.0
+                        placeholder = self.get_updates_use_audio_in_video(
+                            thinker_config=self.info.get_hf_config(),
+                            audio_len=audio_len,
+                            video_grid_thw=video_grid,
+                            video_second_per_grid_t=video_second,
+                        )
+                    else:
+                        vid_len = video_lengths[vid_idx] if vid_idx < len(video_lengths) else 0
+                        placeholder = [video_pad_id] * vid_len
+                    new_ids.extend(placeholder)
+                    new_ids.append(vision_eos_id)
+                    video_is_embed = torch.tensor(placeholder) == video_pad_id
+                    video_placeholders[vid_idx] = PlaceholderFeaturesInfo(
+                        modality="video",
+                        item_idx=vid_idx,
+                        start_idx=start_idx,
+                        tokens=placeholder,
+                        is_embed=video_is_embed,
+                    )
+                    i = advance_to_token(i + 1, vision_eos_id)
+                    continue
+            if tok == audio_bos_id and (i == 0 or prompt_ids[i - 1] != vision_bos_id):
+                aud_idx = audio_start_by_pos.get(i)
+                if aud_idx is None:
+                    aud_idx = len(audio_placeholders)
+                i = advance_to_token(i + 1, audio_eos_id)
+                if aud_idx in paired_audio_set:
+                    continue
+                if aud_idx >= len(audio_output_lengths):
+                    raise ValueError("Audio length index out of range for standalone audio.")
+                aud_len = audio_output_lengths[aud_idx]
+                start_idx = len(new_ids) + 1
+                new_ids.append(audio_bos_id)
+                if aud_len > 0:
+                    new_ids.extend([audio_pad_id] * aud_len)
+                new_ids.append(audio_eos_id)
+                audio_placeholders[aud_idx] = PlaceholderFeaturesInfo(
+                    modality="audio",
+                    item_idx=aud_idx,
+                    start_idx=start_idx,
+                    tokens=[audio_pad_id] * aud_len,
+                    is_embed=None,
+                )
+                continue
+            new_ids.append(tok)
+            i += 1
+
+        for vid_idx, aud_idx in paired_video_to_audio.items():
+            video_placeholder = video_placeholders.get(vid_idx)
+            if video_placeholder is None:
+                continue
+            audio_is_embed = torch.tensor(video_placeholder.tokens) == audio_pad_id
+            audio_placeholders[aud_idx] = PlaceholderFeaturesInfo(
+                modality="audio",
+                item_idx=aud_idx,
+                start_idx=video_placeholder.start_idx,
+                tokens=video_placeholder.tokens,
+                is_embed=audio_is_embed,
+            )
+
+        mm_item_counts = mm_items.get_all_counts()
+        mm_placeholders = {}
+        if mm_item_counts.get("audio", 0) > 0:
+            mm_placeholders["audio"] = [audio_placeholders[i] for i in range(mm_item_counts["audio"])]
+        if mm_item_counts.get("video", 0) > 0:
+            mm_placeholders["video"] = [video_placeholders[i] for i in range(mm_item_counts["video"])]
+        if mm_item_counts.get("image", 0) > 0:
+            mm_placeholders["image"] = [image_placeholders[i] for i in range(mm_item_counts["image"])]
+
+        return new_ids, mm_placeholders
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -812,6 +1020,18 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     use_audio_in_video = True
                 else:
                     use_audio_in_video = False
+
+        if use_audio_in_video and mm_item_counts.get("audio", 0) and mm_item_counts.get("video", 0):
+            prompt_ids, mm_placeholders = self._apply_mixed_audio_video_prompt_updates(
+                prompt_ids=prompt_ids,
+                mm_items=mm_items,
+                mm_kwargs=mm_kwargs,
+            )
+            self._validate_mm_placeholders(
+                mm_placeholders,
+                mm_item_counts,
+            )
+            return prompt_ids, mm_placeholders
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
