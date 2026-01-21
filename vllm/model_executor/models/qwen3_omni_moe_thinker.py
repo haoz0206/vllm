@@ -738,10 +738,14 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         if audio_feature_lengths is None and feature_attention_mask is None:
             audio_output_lengths = []
         elif audio_feature_lengths is not None:
-            _, audio_output_lens = _get_feat_extract_output_lengths(audio_feature_lengths)
+            _, audio_output_lens = _get_feat_extract_output_lengths(
+                audio_feature_lengths
+            )
             audio_output_lengths = audio_output_lens.tolist()
         else:
-            _, audio_output_lens = _get_feat_extract_output_lengths(feature_attention_mask.sum(-1))
+            _, audio_output_lens = _get_feat_extract_output_lengths(
+                feature_attention_mask.sum(-1)
+            )
             audio_output_lengths = audio_output_lens.tolist()
 
         image_grid_thw = out_mm_data.get("image_grid_thw")
@@ -783,14 +787,19 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 audio_start_by_pos[i] = audio_idx
                 audio_idx += 1
 
-        audio_positions = [(pos, idx) for pos, kind, idx in positions if kind == "audio"]
+        audio_positions = [
+            (pos, idx) for pos, kind, idx in positions if kind == "audio"
+        ]
         audio_ptr = 0
         paired_video_to_audio = {}
         paired_audio_set = set()
         for pos, kind, vid_idx in positions:
             if kind != "video":
                 continue
-            while audio_ptr < len(audio_positions) and audio_positions[audio_ptr][0] <= pos:
+            while (
+                audio_ptr < len(audio_positions)
+                and audio_positions[audio_ptr][0] <= pos
+            ):
                 audio_ptr += 1
             if audio_ptr < len(audio_positions):
                 _, aud_idx = audio_positions[audio_ptr]
@@ -818,7 +827,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     img_idx = image_start_by_pos.get(i)
                     if img_idx is None:
                         img_idx = len(image_placeholders)
-                    img_len = image_lengths[img_idx] if img_idx < len(image_lengths) else 0
+                    img_len = (
+                        image_lengths[img_idx] if img_idx < len(image_lengths) else 0
+                    )
                     start_idx = len(new_ids) + 1
                     new_ids.append(vision_bos_id)
                     if img_len > 0:
@@ -842,9 +853,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     if vid_idx in paired_video_to_audio:
                         aud_idx = paired_video_to_audio[vid_idx]
                         if aud_idx >= len(audio_output_lengths):
-                            raise ValueError("Audio length index out of range for audio-in-video pairing.")
+                            raise ValueError(
+                                "Audio length index out of range for audio-in-video pairing."
+                            )
                         if video_grid_thw is None or vid_idx >= len(video_grid_thw):
-                            raise ValueError("Missing video grid for audio-in-video pairing.")
+                            raise ValueError(
+                                "Missing video grid for audio-in-video pairing."
+                            )
                         audio_len = audio_output_lengths[aud_idx]
                         video_grid = video_grid_thw[vid_idx]
                         if second_per_grid_ts is not None:
@@ -858,7 +873,11 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                             video_second_per_grid_t=video_second,
                         )
                     else:
-                        vid_len = video_lengths[vid_idx] if vid_idx < len(video_lengths) else 0
+                        vid_len = (
+                            video_lengths[vid_idx]
+                            if vid_idx < len(video_lengths)
+                            else 0
+                        )
                         placeholder = [video_pad_id] * vid_len
                     new_ids.extend(placeholder)
                     new_ids.append(vision_eos_id)
@@ -880,7 +899,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 if aud_idx in paired_audio_set:
                     continue
                 if aud_idx >= len(audio_output_lengths):
-                    raise ValueError("Audio length index out of range for standalone audio.")
+                    raise ValueError(
+                        "Audio length index out of range for standalone audio."
+                    )
                 aud_len = audio_output_lengths[aud_idx]
                 start_idx = len(new_ids) + 1
                 new_ids.append(audio_bos_id)
@@ -914,11 +935,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_item_counts = mm_items.get_all_counts()
         mm_placeholders = {}
         if mm_item_counts.get("audio", 0) > 0:
-            mm_placeholders["audio"] = [audio_placeholders[i] for i in range(mm_item_counts["audio"])]
+            mm_placeholders["audio"] = [
+                audio_placeholders[i] for i in range(mm_item_counts["audio"])
+            ]
         if mm_item_counts.get("video", 0) > 0:
-            mm_placeholders["video"] = [video_placeholders[i] for i in range(mm_item_counts["video"])]
+            mm_placeholders["video"] = [
+                video_placeholders[i] for i in range(mm_item_counts["video"])
+            ]
         if mm_item_counts.get("image", 0) > 0:
-            mm_placeholders["image"] = [image_placeholders[i] for i in range(mm_item_counts["image"])]
+            mm_placeholders["image"] = [
+                image_placeholders[i] for i in range(mm_item_counts["image"])
+            ]
 
         return new_ids, mm_placeholders
 
@@ -1010,6 +1037,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         """
         Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
         """
+        # import sys
+        # if 'debugpy' in sys.modules:
+        #     breakpoint()
+
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -1020,18 +1051,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     use_audio_in_video = True
                 else:
                     use_audio_in_video = False
-
-        if use_audio_in_video and mm_item_counts.get("audio", 0) and mm_item_counts.get("video", 0):
-            prompt_ids, mm_placeholders = self._apply_mixed_audio_video_prompt_updates(
-                prompt_ids=prompt_ids,
-                mm_items=mm_items,
-                mm_kwargs=mm_kwargs,
-            )
-            self._validate_mm_placeholders(
-                mm_placeholders,
-                mm_item_counts,
-            )
-            return prompt_ids, mm_placeholders
+        # if use_audio_in_video and mm_item_counts.get("audio", 0) and mm_item_counts.get("video", 0):
+        #     prompt_ids, mm_placeholders = self._apply_mixed_audio_video_prompt_updates(
+        #         prompt_ids=prompt_ids,
+        #         mm_items=mm_items,
+        #         mm_kwargs=mm_kwargs,
+        #     )
+        #     self._validate_mm_placeholders(
+        #         mm_placeholders,
+        #         mm_item_counts,
+        #     )
+        #     return prompt_ids, mm_placeholders
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
@@ -1048,9 +1078,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 filtered_updates = {
                     k: v for k, v in mm_prompt_updates.items() if k != "audio"
                 }
-                prompt_ids, mm_placeholders = self._apply_prompt_updates(
-                    prompt_ids,
-                    filtered_updates,
+                plain_audio = mm_prompt_updates["audio"][:-1]
+                filtered_updates["audio"] = plain_audio
+                prompt_ids, mm_placeholders = (
+                    self._apply_prompt_updates(  # @zhonghao, here the returned prompt_ids is already the same as hf forward input_ids
+                        prompt_ids,
+                        filtered_updates,
+                    )
                 )
                 # Derive audio placeholders from video placeholders
                 mm_placeholders = self._derive_audio_from_video_placeholders(
@@ -1183,15 +1217,23 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
         use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         thinker_config = self.info.get_hf_config()
+        video_count = mm_items.get_count(
+            "video", strict=False
+        )  # @zhonghao: counting video to revert indexing on audios
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
-            nonlocal audio_in_video_item_idx
+            # nonlocal audio_in_video_item_idx
+            nonlocal audio_item_idx
+            audio_in_video_item_idx = audio_item_idx
             audio_num_features = audio_output_lengths[
-                audio_in_video_item_idx + item_idx
+                audio_in_video_item_idx
+                + item_idx
+                - video_count  # @zhonghao: now assuming audios that in the video are at the end of audio list
             ]
             video_grid_thw = out_mm_data["video_grid_thw"][item_idx]
 
             audio_in_video_item_idx += 1
+            audio_item_idx = audio_in_video_item_idx
 
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
             if second_per_grid_ts:
@@ -1249,10 +1291,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         num_videos = len(placeholders["video"])
         num_audios = len(mm_prompt_updates.get("audio", []))
         if num_audios != num_videos:
-            raise ValueError(
-                f"use_audio_in_video requires equal number of audio and video items, "
-                f"got {num_audios=}, {num_videos=}"
-            )
+            # @zhonghao, for hybrid mrope, it's OK to have different number of audio and video items
+            pass
+            # raise ValueError(
+            #     f"use_audio_in_video requires equal number of audio and video items, "
+            #     f"got {num_audios=}, {num_videos=}"
+            # )
 
         tokenizer = self.info.get_tokenizer()
         processor = self.info.get_hf_processor()
@@ -1275,7 +1319,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             )
             audio_placeholders.append(audio_placeholder)
 
-        result_placeholders["audio"] = audio_placeholders
+        result_placeholders["audio"].extend(audio_placeholders)
         return result_placeholders
 
     def _get_raw_input_ids(
@@ -1689,6 +1733,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        # #FIXME
+        import sys
+
+        if "debugpy" in sys.modules:
+            breakpoint()
+        else:
+            import debugpy
+
+            debugpy.listen(5679)
+            print("Waiting for Debugger on vLLM side...")
+            debugpy.wait_for_client()
+            breakpoint()
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
             {
