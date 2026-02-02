@@ -789,7 +789,7 @@ def _apply_matches(
 
         for (modality, item_idx), (match, update_idx) in matches_to_apply:
             matched_update = mm_prompt_updates[modality][item_idx][update_idx]
-            matched_content = matched_update.content.full  # @zhonghao: here the matched_content is the interleaved audio-video tokens
+            matched_content = matched_update.content.full # @zhonghao: here the matched_content is the interleaved audio-video tokens
 
             if mode == UpdateMode.INSERT:
                 end_idx_to_insert = match.end_idx
@@ -1881,7 +1881,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         caching the results and reusing cached results.
         """
         cache = self.cache
-
+        # import sys
+        # if 'debugpy' in sys.modules:
+        #     breakpoint()
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
             return self._apply_hf_processor(
@@ -1927,7 +1929,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ),
         )
 
-        mm_missing_prompt_updates = self._get_mm_prompt_updates(  # @zhonghao: here the interleaved tokens are wrong for video piece
+        mm_missing_prompt_updates = self._get_mm_prompt_updates( # @zhonghao: here the interleaved tokens are wrong for video piece
             mm_missing_data_items,
             hf_processor_mm_kwargs,
             mm_missing_kwargs,
@@ -2122,10 +2124,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
            processed token IDs.
         """
         mm_items = self._to_mm_items(mm_data)
-        import sys
-
-        if "debugpy" in sys.modules:
-            breakpoint()
+        # import sys
+        # if 'debugpy' in sys.modules:
+        #     breakpoint()
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
